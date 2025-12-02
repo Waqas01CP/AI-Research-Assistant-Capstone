@@ -36,3 +36,4 @@ my_agent_data.db
 
 # Ignore ADK local database
 adk_data.db
+*.sqlite
