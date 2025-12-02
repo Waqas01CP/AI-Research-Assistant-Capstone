@@ -6,22 +6,37 @@ from google.genai.types import Content, Part
 from typing import AsyncGenerator
 from .config import worker_model, critic_model
 
-# --- SYNTHESIS ---
+# =============================================================================
+# PHASE 1: CONTEXT ENGINEERING & SYNTHESIS
+# Design Pattern: "Context Compaction"
+# =============================================================================
+# The user's chat history might be messy. This agent acts as a "Compressor".
+# It takes the back-and-forth conversation and distills it into a single,
+# high-fidelity directive. This ensures the research agents don't get distracted
+# by conversational filler.
+
 intent_synthesis_agent = Agent(
     name="IntentSynthesisAgent",
-    model=critic_model,
+    model=critic_model, # Using the smarter 'Pro' model for reasoning
     instruction="""You are a Lead Research Architect.
     
-    INPUT: A conversation history containing a Research Topic and specific user answers regarding Focus and Audience.
+    ### INPUT DATA
+    You will receive a conversation history containing:
+    1. The User's initial vague topic.
+    2. The User's specific answers regarding Focus, Audience, and Depth.
     
-    TASK: Synthesize this into a 'Master Research Directive'.
-    - This directive must be extremely detailed.
-    - Explicitly state the technical depth required (e.g., 'Ph.D. level', 'Engineering Manager level').
-    - Identify key constraints: Citations required? Code examples required? Market data required?
+    ### YOUR MISSION
+    Synthesize this information into a 'Master Research Directive'.
+    
+    ### CONSTRAINTS
+    - Do not summarize the chat. Create an instruction manual for a research team.
+    - Explicitly state the technical depth required (e.g., "Ph.D. level" vs "High School level").
     - If the user was vague, infer a high standard of professional quality.
     
-    OUTPUT: A single, comprehensive paragraph defining the mission for the autonomous team.""",
-    output_key="clarified_user_intent",
+    ### OUTPUT FORMAT
+    A single, dense paragraph starting with: "RESEARCH DIRECTIVE: ..."
+    """,
+    output_key="clarified_user_intent", # Saves result to session state
 )
 
 # --- INITIALIZER (Fix for KeyError) ---
@@ -33,21 +48,29 @@ class StateInitializerAgent(BaseAgent):
             context.session.state["critique_result"] = "No previous critique (First Draft)."
         yield Event(author=self.name, content=Content(parts=[Part(text="State initialized.")]))
 
-# --- RESEARCH TEAM ---
+
+# =============================================================================
+# PHASE 2: PARALLEL RESEARCH TEAM
+# Design Pattern: "Parallel Execution"
+# =============================================================================
+# Instead of one agent doing everything sequentially (slow), we spawn three
+# specialist agents to run simultaneously. This reduces latency and ensures
+# diverse perspectives (Theoretical, Market, and Practical).
+
 tech_background_researcher = Agent(
     name="TechBackgroundResearcher",
     model=worker_model,
     instruction="""You are a Senior Technical Researcher.
     
-    MISSION: Research the core theoretical and technical underpinnings of: {clarified_user_intent}.
+    ### MISSION
+    Research the core theoretical and technical underpinnings of: {clarified_user_intent}.
     
-    REQUIREMENTS:
-    1. Do NOT provide surface-level definitions. Assume the reader is intelligent.
-    2. Focus on architecture, algorithms, underlying physics/math, and system design.
-    3. Identify controversies or debating points in the field.
-    4. CITE YOUR SOURCES. Every claim must have a reference or origin.
-    
-    OUTPUT: A structured technical deep-dive.""",
+    ### EXECUTION RULES
+    1. **Depth over Breadth:** Do NOT provide surface-level definitions. Assume the reader is intelligent.
+    2. **Technical Focus:** Focus on architecture, algorithms, underlying physics/math, and system design.
+    3. **Academic Rigor:** Identify controversies or debating points in the field.
+    4. **Citations:** Use the google_search tool to find real sources.
+    """,
     tools=[google_search],
     output_key="tech_background_research",
 )
@@ -57,9 +80,9 @@ existing_solutions_researcher = Agent(
     model=worker_model,
     instruction="""You are a Market & Competitive Intelligence Analyst.
     
-    MISSION: Analyze the landscape for: {clarified_user_intent}.
+    ### MISSION: Analyze the landscape for: {clarified_user_intent}.
     
-    REQUIREMENTS:
+    ### EXECUTION RULES:
     1. Identify state-of-the-art (SOTA) solutions, competitors, or academic papers.
     2. Compare them critically. What are their tradeoffs? (Cost vs Performance, etc.)
     3. Look for recent developments (last 6-12 months).
@@ -75,9 +98,9 @@ tools_and_tech_researcher = Agent(
     model=worker_model,
     instruction="""You are a Principal Software Architect.
     
-    MISSION: Recommend the practical stack/tools for: {clarified_user_intent}.
+    ### MISSION: Recommend the practical stack/tools for: {clarified_user_intent}.
     
-    REQUIREMENTS:
+    ### EXECUTION RULES:
     1. Do not just list tools; justify them based on the specific use case.
     2. Evaluate based on: Maturity, Community Support, Performance, and Ease of Use.
     3. Provide a 'Recommended Stack' vs 'Alternative Stack'.
@@ -88,25 +111,35 @@ tools_and_tech_researcher = Agent(
     output_key="tools_and_tech_research",
 )
 
-# --- WRITING & REFINEMENT ---
+# =============================================================================
+# PHASE 3: REFINEMENT LOOP (Draft -> Critique -> Validate)
+# Design Pattern: "Iterative Refinement / Loop"
+# =============================================================================
+# This is a self-correcting mechanism. The system will not output the first draft.
+# It forces a critique cycle to improve quality before the user ever sees it.
+
 drafting_agent = Agent(
     name="DraftingAgent",
     model=worker_model,
     instruction="""You are a Technical Author for a top-tier industry publication (e.g., O'Reilly, Nature, HBR).
     
-    INPUTS:
+    ### INPUT CONTEXT
     - Directive: {clarified_user_intent}
-    - Theory: {tech_background_research}
-    - Market: {existing_solutions_research}
-    - Tools: {tools_and_tech_research}
-    - Feedback History: {critique_result}
+    - Theoretical Data: {tech_background_research}
+    - Market Data: {existing_solutions_research}
+    - Practical Data: {tools_and_tech_research}
+    - **CRITIC FEEDBACK:** {critique_result}
     
-    TASK: Synthesize these raw findings into a cohesive, narrative report.
+    ### TASK: Synthesize these raw findings into a cohesive, narrative report.
     
-    STYLE GUIDE:
+    ### STYLE GUIDE:
     - Tone: Professional, Objective, Authoritative.
-    - Structure: Executive Summary -> Technical Deep Dive -> Market Analysis -> Implementation Guide -> Conclusion.
+    - Structure: Provide a better structure than the given below and if unable to do it then use the given below:
+        "Executive Summary -> Technical Deep Dive -> Market Analysis -> Implementation Guide -> Conclusion."
+    
+    ### CRITICAL INSTRUCTION:
     - **Crucial:** If you received Feedback ({critique_result}), you must specifically address those points in this rewrite.
+    - Do not ignore the critic.
     
     OUTPUT: The full report draft.""",
     output_key="report_draft",
@@ -117,15 +150,15 @@ dynamic_critic_agent = Agent(
     model=critic_model,
     instruction="""You are an Executive Editor and Subject Matter Expert.
     
-    TASK: Review the DRAFT ({report_draft}) against the DIRECTIVE ({clarified_user_intent}).
+    ### TASK: Review the DRAFT ({report_draft}) against the DIRECTIVE ({clarified_user_intent}).
     
-    CRITERIA:
-    1. **Depth:** Is it too shallow? Does it explain 'how' and 'why', not just 'what'?
+    ### CRITERIA:
+    1. **Depth:** Is it too shallow? Does it explain 'how' and 'why', not just 'what'? 
     2. **Accuracy:** Do the tools/market data make sense?
     3. **Completeness:** Did it answer the specific user focus?
     4. **Formatting:** Is it readable?
     
-    DECISION:
+    ### DECISION:
     - If the report is excellent and ready for publication, output exactly: "APPROVED".
     - If it needs work, output a bulleted list of SPECIFIC, HIGH-IMPACT changes required. Be harsh but constructive.""",
     output_key="critique_result",
@@ -146,15 +179,50 @@ formatting_agent = Agent(
     OUTPUT: The final Markdown document.""",
 )
 
-# --- GUARDRAILS ---
+# =============================================================================
+# PHASE 4: DETERMINISTIC GUARDRAILS
+# Design Pattern: "Keyword Filtering"
+# =============================================================================
+
 class SecurityGuardrailAgent(BaseAgent):
+    """
+    Acts as a firewall. Checks for malicious keywords before allowing
+    the agents to access the internet tools.
+    """
     async def _run_async_impl(self, context: InvocationContext) -> AsyncGenerator[Event, None]:
+        # 1. Get the intent
         intent = context.session.state.get("clarified_user_intent", "")
-        if "hack" in intent.lower() or "exploit" in intent.lower():
-            raise PermissionError("Security violation detected.")
-        yield Event(author=self.name, content=Content(parts=[Part(text="Safe.")]))
+        
+        # 2. Define Forbidden Concepts (Expanded list)
+        forbidden_keywords = [
+            "hack", "exploit", "malware", "illegal", "bypass", 
+            "phishing", "ddos", "keylogger", "ransomware", 
+            "bomb", "weapon", "steal", "fraud"
+        ]
+        
+        # 3. Check (Case-insensitive)
+        print(f"\n🛡️ [Security Guardrail] Scanning intent: '{intent}'")
+        
+        found_violation = False
+        for bad_word in forbidden_keywords:
+            if bad_word in intent.lower():
+                found_violation = True
+                print(f"🚨 [Security Guardrail] BLOCKED. Keyword found: '{bad_word}'")
+                break
+        
+        if found_violation:
+            # This specific error text comes from YOUR code, not Gemini.
+            raise PermissionError("Security Violation: Request denied by local policy (Keyword Filter).")
+        
+        print("✅ [Security Guardrail] PASSED.")
+        yield Event(author=self.name, content=Content(parts=[Part(text="Security Check Passed.")]))
 
 class ReportValidationAgent(BaseAgent):
+    """
+    Acts as the Logic Gate for the Refinement Loop.
+    It reads the Critic's output string. If it sees "APPROVED", it triggers
+    the 'escalate' action to break the loop. Otherwise, it lets the loop continue.
+    """
     async def _run_async_impl(self, context: InvocationContext) -> AsyncGenerator[Event, None]:
         critique = context.session.state.get("critique_result", "")
         if critique and "APPROVED" in critique.upper():

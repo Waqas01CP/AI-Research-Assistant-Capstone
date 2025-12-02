@@ -7,24 +7,35 @@ from google.adk.memory import InMemoryMemoryService
 
 async def run_research_pipeline(tool_context: ToolContext, topic: str, specific_focus: str, audience: str) -> dict:
     """
-    Executes the autonomous research pipeline.
-    ONLY call this after you have gathered the topic, focus, and audience from the user.
+    Executes the autonomous research pipeline in an isolated environment.
+    
+    ARCHITECTURAL Note:
+    This function implements the "Session Isolation" pattern. 
+    Problem: Multi-agent research generates massive amounts of raw data (search results, 
+    internal drafts, critique logs) which would pollute the user's main chat context window.
+    
+    Solution: We instantiate a fresh `InMemorySessionService` here. This creates a 
+    temporary, private workspace for the sub-agents. They do their messy work in private, 
+    and only the final polished report is returned to the main user session.
     """
     
-    # Imports
+    # Local imports to prevent circular dependencies at the module level
     from .agent import autonomous_pipeline
     from .internal_agents import intent_synthesis_agent
 
-    # Setup isolated environment
+    # 1. Setup Isolated Environment (The Private Workspace)
     session_service = InMemorySessionService()
     memory_service = InMemoryMemoryService()
     
+    # We create a derived session ID to track this specific job logically
     internal_id = f"research-{tool_context._invocation_context.session.id}"
     user_id = tool_context._invocation_context.session.user_id
-
+    
+    # Initialize the private session
     await session_service.create_session(app_name="research_agent", user_id=user_id, session_id=internal_id)
 
-    # 1. Run Synthesis (Combine the args into a plan)
+    # 2. Run Synthesis Phase
+    # The first step is to combine the chat arguments into a robust prompt for the researchers.
     runner = Runner(
         agent=intent_synthesis_agent, app_name="research_agent",
         session_service=session_service, memory_service=memory_service
@@ -40,14 +51,14 @@ async def run_research_pipeline(tool_context: ToolContext, topic: str, specific_
     msg = Content(role="user", parts=[Part(text=synthesis_input)])
     async for event in runner.run_async(session_id=internal_id, user_id=user_id, new_message=msg): pass 
 
-    # 2. Run the Autonomous Pipeline
+    # 3. Run the Autonomous Pipeline
+    # This triggers the Sequential Agent (Security -> Parallel Research -> Refinement Loop)
     runner = Runner(
         agent=autonomous_pipeline, app_name="research_agent",
         session_service=session_service, memory_service=memory_service
     )
     
-    # CRITICAL FIX: The pipeline needs a 'kickoff' message to start running.
-    # It won't use the text content (it reads from session state), but it needs the event.
+    # The pipeline is self-driven based on session state, but needs a trigger event to start.
     trigger_msg = Content(role="user", parts=[Part(text="Begin Research Pipeline")])
     
     final_report = "Report generation failed."
