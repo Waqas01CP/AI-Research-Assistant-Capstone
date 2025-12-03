@@ -1,6 +1,6 @@
 # Project Execution Sequence
 
-Here is the step-by-step visual workflow of the Autonomous Research Concierge.
+Here is the output of the Autonomous Research Concierge generated.
 
 ![Output 1](Output1.png)
 
